@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.h5
+*.gff
+equivalence_check.py

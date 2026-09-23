@@ -1,0 +1,6 @@
+numpy>=1.24
+numba>=0.57
+h5py>=3.8
+biopython>=1.79
+tqdm>=4.65
+torch>=2.0

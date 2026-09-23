@@ -1,0 +1,96 @@
+ANNEVO Non-Commercial License
+Version 1.0, 2025
+
+Copyright (c) 2025 Pengyu Zhang, Kai Ye, and Xi'an Jiaotong University
+All rights reserved.
+
+-------------------------------------------------------------------------------
+                                    Preamble
+-------------------------------------------------------------------------------
+
+The intent of this document is to state the conditions under which the ANNEVO
+software package may be used, copied, modified, and distributed. The goal is to
+allow academic institutions and non-profit organizations to freely use the
+software for research purposes, while preserving the copyright holder’s rights
+to control and license commercial usage.
+
+This license is designed to ensure that academic users can benefit from ANNEVO
+without restriction, but that any commercial usage requires a separate
+commercial license agreement.
+
+-------------------------------------------------------------------------------
+                                  Definitions
+-------------------------------------------------------------------------------
+
+For the purposes of this license:
+
+- “Academic Use” means use by accredited academic institutions and non-profit
+  research organizations for non-commercial research and education.
+
+- “Commercial Use” means any use by a commercial entity, or use intended for
+  commercial advantage or monetary compensation. This includes, but is not
+  limited to, use in commercial products or services, contract research,
+  fee-for-service activities, or collaborations where results are intended
+  for commercial purposes.
+
+-------------------------------------------------------------------------------
+1. Grant of License
+-------------------------------------------------------------------------------
+
+Permission is hereby granted, free of charge, to academic institutions and
+non-profit organizations to use, copy, and modify this software and associated
+documentation files (the “Software”) for non-commercial research purposes,
+subject to the following conditions:
+
+- The Software may not be used for any commercial purpose, including but not
+  limited to use in a commercial product, service, or for-profit research,
+  without prior written permission from the copyright holder.
+- Redistributions of the Software, in whole or in part, must retain this license
+  file and copyright notice.
+- Commercial entities wishing to use the Software must obtain a separate
+  commercial license.
+
+For commercial licensing inquiries, please contact:
+Pengyu Zhang (pengyuzhang@stu.xjtu.edu.cn) or Kai Ye (kaiye@xjtu.edu.cn).
+
+-------------------------------------------------------------------------------
+2. Disclaimer of Warranty
+-------------------------------------------------------------------------------
+
+THERE IS NO WARRANTY FOR THE SOFTWARE, TO THE EXTENT PERMITTED BY APPLICABLE
+LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT HOLDERS AND/OR
+OTHER PARTIES PROVIDE THE SOFTWARE “AS IS” WITHOUT WARRANTY OF ANY KIND,
+EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE
+RISK AS TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH YOU. SHOULD THE
+SOFTWARE PROVE DEFECTIVE, YOU ASSUME THE COST OF ALL NECESSARY SERVICING,
+REPAIR OR CORRECTION.
+
+-------------------------------------------------------------------------------
+3. Limitation of Liability
+-------------------------------------------------------------------------------
+
+IN NO EVENT UNLESS REQUIRED BY APPLICABLE LAW OR AGREED TO IN WRITING WILL ANY
+COPYRIGHT HOLDER, OR ANY OTHER PARTY WHO MODIFIES AND/OR CONVEYS THE SOFTWARE,
+BE LIABLE TO YOU FOR DAMAGES, INCLUDING ANY GENERAL, SPECIAL, INCIDENTAL OR
+CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OR INABILITY TO USE THE SOFTWARE
+(INCLUDING BUT NOT LIMITED TO LOSS OF DATA OR DATA BEING RENDERED INACCURATE
+OR LOSSES SUSTAINED BY YOU OR THIRD PARTIES OR A FAILURE OF THE SOFTWARE TO
+OPERATE WITH ANY OTHER PROGRAMS), EVEN IF SUCH HOLDER OR OTHER PARTY HAS BEEN
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+-------------------------------------------------------------------------------
+4. No Surrender of Rights
+-------------------------------------------------------------------------------
+
+Nothing in this license shall be construed as granting permission to
+incorporate the Software into proprietary works without a separate commercial
+license, nor to remove or alter the terms stated herein.
+
+-------------------------------------------------------------------------------
+5. Summary
+-------------------------------------------------------------------------------
+
+- Free for academic and non-profit research use
+- Commercial use is prohibited without a separate license
+- Provided “as is” without warranty or liability
