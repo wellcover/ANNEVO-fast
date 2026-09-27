@@ -142,7 +142,7 @@ x = np.arange(2)
 ref = [17.9, 59.4]
 fast = [3.4, 22.3]
 w = 0.34
-b1 = ax.bar(x - w / 2, ref, w, label="参考实现", color=C_REF, zorder=3)
+b1 = ax.bar(x - w / 2, ref, w, label="官方对照", color=C_REF, zorder=3)
 b2 = ax.bar(x + w / 2, fast, w, label="本仓库", color=C_NEW, zorder=3)
 for b, v in zip(b1, ref):
     ax.text(b.get_x() + b.get_width() / 2, v + 1.4, f"{v} 秒", ha="center",
