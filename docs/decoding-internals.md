@@ -2,17 +2,6 @@
 
 *How a gene-grammar HMM is made 3–5× faster without changing a single base of its output.*
 
-> **Too long; didn't read.** A neural network labels every base of a genome
-> ("this is exon", "this is a splice site", …), but its answers are slightly
-> noisy, and noise destroys genes. A hand-built state machine — the HMM —
-> cleans this up by only allowing *grammatically legal* genes. Running that
-> machine was slow because the textbook algorithm compares every state
-> against every other state at every base. But the machine's rulebook is
-> almost empty: from any state, only a handful of moves are legal. ANNEVO-Fast
-> pre-computes the legal moves into a lookup table, cuts the inner loop by
-> ~164×, and — the hard part — produces *exactly* the same output as before,
-> bit for bit.
-
 This article explains the algorithms and engineering behind the decoding half
 of ANNEVO-Fast (`decoding.py`, `src/HMM.py`, `src/gene_decoding.py`). It is
 written to be read top-to-bottom by someone who knows what a genome and a
