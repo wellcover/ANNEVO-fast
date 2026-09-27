@@ -75,9 +75,16 @@ bars = ax.barh(labels, vals, color=colors, height=0.62, zorder=3)
 for b, v in zip(bars, vals):
     ax.text(b.get_width() + 2.5, b.get_y() + b.get_height() / 2, str(v),
             va="center", fontsize=9.5, color="#333", zorder=4)
-ax.annotate("语法状态：50", xy=(30, 1.0), fontsize=9.5, color="#555", style="italic")
-ax.annotate("计数器：120\n（占 S 的 70%）", xy=(78, 5.4), fontsize=9.5,
-            color=C_HOT, fontweight="bold")
+# 括号标注上方六个语法家族（行 1–6）
+bx = 31
+ax.plot([bx, bx], [0.6, 6.45], color="#888", lw=1.0, zorder=2)
+ax.plot([bx - 1.4, bx], [6.45, 6.45], color="#888", lw=1.0, zorder=2)
+ax.plot([bx - 1.4, bx], [0.6, 0.6], color="#888", lw=1.0, zorder=2)
+ax.text(bx + 2.5, 3.5, "语法状态合计：50", fontsize=9.5, color="#555",
+        style="italic", va="center", zorder=4)
+# 计数器占比写进柱体内部
+ax.text(55, 0, "占 S 的 70%", fontsize=9.5, color="white", fontweight="bold",
+        va="center", zorder=4)
 ax.set_xlim(0, 140)
 ax.set_xlabel("状态数")
 ax.set_title("A  170 个状态由什么构成", loc="left", fontweight="bold")
