@@ -13,7 +13,7 @@ original ANNEVO Non-Commercial License (see `LICENSE`).
 📄 **[Inside the ANNEVO-Fast Decoder](docs/decoding-internals.md)** — a detailed
 article on the gene-grammar HMM, the sparse-edge Viterbi rewrite
 (O(L·S²) → O(L·E)), and what "bit-exact equivalence" guarantees and how it is
-enforced.
+enforced. （[中文版](docs/decoding-internals.zh-CN.md)）
 
 ## What is different from the official pipeline
 

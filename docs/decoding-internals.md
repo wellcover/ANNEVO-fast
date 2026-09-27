@@ -1,5 +1,7 @@
 # Inside the ANNEVO-Fast Decoder
 
+**English** | [中文](decoding-internals.zh-CN.md)
+
 *How a gene-grammar HMM is made 3–5× faster without changing a single base of its output.*
 
 This article explains the algorithms and engineering behind the decoding half
