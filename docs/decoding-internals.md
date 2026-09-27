@@ -58,24 +58,36 @@ per-process cache that all Viterbi calls share:
 
 ```mermaid
 flowchart LR
-    H[("per-base posteriors<br/>(HDF5, both strands)")] --> R["candidate region detection<br/>cumsum window scan + RLE"]
-    R --> V1["Viterbi pass 1<br/>min_intron = 1, sparse edge table"]
-    V1 --> P{"any intron &lt; min_intron_length<br/>in decoded result?"}
-    P -- "no (common case)" --> S["gene scoring / filtering<br/>(--min_cds_score)"]
-    P -- "yes → re-decode" --> V2["Viterbi pass 2<br/>full counter machine"]
-    V2 --> S
-    C[("process-level cache:<br/>states · 5 matrices · edge table")]
+    classDef data fill:#eef3f8,stroke:#2e6f9e,stroke-width:1.5px,color:#1a3a52
+    classDef compute fill:#ffffff,stroke:#2e6f9e,stroke-width:2px,color:#1a3a52
+    classDef decision fill:#fdf4e3,stroke:#d98e32,color:#5a4a1f
+    classDef cache fill:#f4f4f4,stroke:#9aa5b1,stroke-dasharray:5 4,color:#555
+    classDef out fill:#ecf6ef,stroke:#3d8b57,color:#1e4a2e
+
+    H[("per-base posteriors<br/>HDF5 · both strands")]:::data
+    R["① candidate regions<br/>cumsum scan + RLE"]:::compute
+    V1["② Viterbi pass 1 — min_intron = 1<br/>sparse edge table"]:::compute
+    P{"③ any intron &lt; min_intron_length<br/>in the result?"}:::decision
+    V2["②′ Viterbi pass 2<br/>full counter machine"]:::compute
+    S["④ gene scoring / filtering<br/>(--min_cds_score)"]:::compute
+    G["⑤ GFF3 output<br/>deterministic order"]:::out
+    C[("process cache<br/>states · 5 matrices · edge table")]:::cache
+
+    H --> R --> V1 --> P
+    P -- "no — common case" --> S
+    P -- "yes — rare" --> V2 --> S
+    S --> G
     C -.-> V1
     C -.-> V2
-    S --> G["GFF3 output<br/>(deterministic order)"]
 ```
 
-![Overview: state inventory, inner-loop reduction, end-to-end benchmark](assets/decoding_figures.png)
+![Overview: state inventory, sparsity of the transition matrix, per-base inner-loop reduction, end-to-end benchmark](assets/decoding_figures.png)
 
-The three panels above summarize the whole story quantitatively — where the
-170 states come from (A), what the sparse rewrite saves per base (B), and what
-it buys end-to-end (C) — and the rest of the article walks through each in
-detail.
+The four panels summarize the whole story quantitatively — what the 170-state
+machine is made of (A), how empty the transition matrices actually are (B,
+plotted from the real edge table), what the sparse rewrite saves per base (C),
+and what it buys end-to-end (D). The rest of the article walks through each
+in detail.
 
 ---
 
@@ -102,20 +114,40 @@ arc below, stop path to the right):
 
 ```mermaid
 flowchart LR
-    IG["intergenic"] -- "A" --> S0["start0"] -- "T" --> S1["start1"] -- "G" --> S2["start2"]
-    S2 --> C0["CDS0<br/>(phase 0)"]
-    C0 -- "exon continues" --> C1["CDS1"] -- "G" --> C2["CDS2"] -- "exon ends / next codon" --> C0
-    C2 -- "T (stop begins)" --> E0["end0"] -- "A" --> E1["end1_TA / end1_TG"] -- "A | G" --> E2["end2"]
+    classDef igc fill:#f0f0f0,stroke:#9aa5b1,color:#444444
+    classDef cdsc fill:#eaf2fa,stroke:#2e6f9e,color:#1a3a52
+    classDef splc fill:#fdf1e6,stroke:#d98e32,color:#5a4a1f
+    classDef stpc fill:#fbeaea,stroke:#c74440,color:#5a2320
+
+    IG["intergenic"]:::igc
+
+    subgraph START[" gene start — ATG "]
+        S0["start0 · A"]:::cdsc --> S1["start1 · T"]:::cdsc --> S2["start2 · G"]:::cdsc
+    end
+
+    subgraph CYCLE[" CDS phase cycle — codon positions 0 · 1 · 2 "]
+        C0["CDS0"]:::cdsc --> C1["CDS1"]:::cdsc --> C2["CDS2"]:::cdsc --> C0
+    end
+
+    subgraph SPLICE[" splice arc — GT … ≥ 20 nt … AG "]
+        DSS["DSS donor states<br/>+ suffix variants"]:::splc --> IC["intron counters + helpers<br/>intron0 … intron19<br/>(_T / _TA / _TG variants)"]:::splc --> ASS["ASS acceptor states"]:::splc
+    end
+
+    subgraph STOP[" stop codon — TAA / TAG "]
+        E0["end0 · T"]:::stpc --> E1["end1_TA / end1_TG · A"]:::stpc --> E2["end2 · A / G"]:::stpc
+    end
+
+    IG -- "A" --> S0
+    S2 --> C0
+    C0 -- "donor GT.." --> DSS
+    ASS -- "frame-preserving<br/>return" --> C0
+    C2 -- "T" --> E0
     E2 -- "gene done" --> IG
-    C0 -- "donor GT.." --> DSS["DSS donor states"]
-    DSS --> IC["intron counter chain<br/>intron{p}_0 … intron{p}_19<br/>(+ _T/_TA/_TG suffix variants)"]
-    IC -- "..AG acceptor" --> ASS["ASS acceptor states"]
-    ASS -- "frame-preserving return" --> C0
 ```
 
 *(A simplified backbone — the full machine has 170 states at
-`min_intron_length = 20`; the suffix tags and the second CDS arc from
-`CDS1`/`ASS1` are omitted for readability.)*
+`min_intron_length = 20`; the second CDS arc from `CDS1`/`ASS1` and the
+suffix-matched transitions of §2.1 are omitted for readability.)*
 
 **Phase tracking across introns.** `CDS0/1/2` encode the position within the
 current codon, and the suffix-tagged variants track the *partial codon
