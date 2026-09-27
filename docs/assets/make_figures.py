@@ -160,21 +160,23 @@ for b, v in zip(b1, ref):
 for b, v in zip(b2, fast):
     ax.text(b.get_x() + b.get_width() / 2, v + 1.4, f"{v}s", ha="center",
             fontsize=9.5, color="#333", zorder=4)
-# 加速箭头
-ax.annotate("", xy=(0 + w / 2, 5.2), xytext=(0 - w / 2, 18.9),
-            arrowprops=dict(arrowstyle="-|>", color=C_HOT, lw=1.6,
-                            connectionstyle="arc3,rad=0.35"))
-ax.annotate("", xy=(1 + w / 2, 24), xytext=(1 - w / 2, 60.8),
-            arrowprops=dict(arrowstyle="-|>", color=C_HOT, lw=1.6,
-                            connectionstyle="arc3,rad=0.35"))
-ax.text(0.06, 0.88, "5.3×", transform=ax.transAxes, fontsize=14,
-        color=C_HOT, fontweight="bold")
-ax.text(0.60, 0.72, "2.7×", transform=ax.transAxes, fontsize=14,
-        color=C_HOT, fontweight="bold")
+# 括号式加速标注：两条虚线基准线 + 组右侧竖直双向箭头
+for xi, r, f, sp in ((0, 17.9, 3.4, "5.3×"), (1, 59.4, 22.3, "2.7×")):
+    xr = xi + w / 2 + 0.07          # 基准线右端 x
+    ax.hlines(r, xi - w / 2, xr, colors="#888", linestyles=(0, (3, 2)),
+              lw=0.9, zorder=2)
+    ax.hlines(f, xi + w / 2, xr, colors="#888", linestyles=(0, (3, 2)),
+              lw=0.9, zorder=2)
+    ax.annotate("", xy=(xr, f + 1.6), xytext=(xr, r - 1.6),
+                arrowprops=dict(arrowstyle="<|-|>", color=C_HOT, lw=1.5,
+                                mutation_scale=11), zorder=4)
+    ax.text(xr + 0.045, (r + f) / 2, sp, fontsize=13, color=C_HOT,
+            fontweight="bold", va="center", zorder=4)
 ax.set_xticks(x)
 ax.set_xticklabels(["synthetic 2×5 Mb\n6,047 genes", "A. thaliana genome\n24,625 genes"],
                    fontsize=9.5)
 ax.set_ylabel("wall time (s, 24 threads)")
+ax.set_xlim(-0.55, 1.82)
 ax.set_ylim(0, 72)
 ax.legend(frameon=False, loc="upper left")
 ax.set_title("D  What it buys end-to-end (output identical)", loc="left",
