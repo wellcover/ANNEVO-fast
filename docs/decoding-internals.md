@@ -53,8 +53,7 @@ per-base posteriors (HDF5)
    → GFF3
 ```
 
-The same pipeline as a diagram — note the lazy re-decode loop (§2.3) and the
-per-process cache that all Viterbi calls share:
+The same pipeline as a diagram:
 
 ```mermaid
 flowchart LR
@@ -81,13 +80,53 @@ flowchart LR
     C -.-> V2
 ```
 
+*Figure 0 — how a decode job flows.* ① Cheap thresholding (a 50 bp window
+mean plus a per-base high-confidence count; §5) prunes the genome down to a
+handful of candidate regions, so the expensive Viterbi never runs on
+intergenic desert. ② The first pass decodes with the counter chains
+collapsed (`min_intron = 1`) — smaller machine, unconstrained optimum. ③ The
+result is scanned for introns below the requested minimum; if none exist —
+the common case — the path is already final and ②′ is skipped entirely
+(§2.3). ④ Genes are scored and filtered (`--min_cds_score`, §6) and ⑤
+written in deterministic order. The dashed grey cache holds the state tables,
+the five conditional matrices and the compiled edge table; it is built once
+per worker process and shared by every Viterbi call (§4.4), which is what
+makes forking a process pool cheap.
+
 ![Overview: state inventory, sparsity of the transition matrix, per-base inner-loop reduction, end-to-end benchmark](assets/decoding_figures.png)
 
-The four panels summarize the whole story quantitatively — what the 170-state
-machine is made of (A), how empty the transition matrices actually are (B,
-plotted from the real edge table), what the sparse rewrite saves per base (C),
-and what it buys end-to-end (D). The rest of the article walks through each
-in detail.
+***Figure 1 — the whole story in one picture.*** Read it left to right, top
+to bottom:
+
+- **(A) What the machine is made of.** State families of the HMM at
+  `min_intron_length = 20` (§2.1). The gene grammar proper needs only
+  **50 states**; the other **120** (red) are intron-length counter chains —
+  6 suffix families × 20 counters — that exist purely to make introns
+  shorter than 20 nt *topologically impossible*. The bookkeeping device, not
+  the grammar, dominates S — and S is what the dense inner loop pays S² for.
+
+- **(B) Why the dense loop is waste.** Every *finite* entry of the
+  A-conditional transition matrix, plotted at its `(from, to)` coordinates:
+  **160 lit cells out of 28,900 (0.6%)**. The data is not synthetic — the
+  figure script imports the real HMM from this repository and plots the
+  actual edge table. The dense horizontal bands are the counter chains (each
+  counter has exactly one successor; §2.1); the structure near the origin is
+  the CDS/splice grammar. The other four conditional matrices (T/C/G/N) look
+  similar and share **879 edges in total**. A dense Viterbi compares against
+  all 28,900 cells per base; the sparse one touches only the lit ones.
+
+- **(C) What that saves per base.** Inner-loop candidate visits on a log
+  scale: S² = 28,900 comparisons (the vast majority against −∞ weights that
+  can never win) vs ≈ 176 edge visits — per base, only the current
+  nucleotide's table is consulted, hence E/5 ≈ 879/5. The ≈164× reduction is
+  the *inner-loop* ratio; end-to-end gains are smaller because I/O, region
+  detection and formatting dominate after the rewrite (§7).
+
+- **(D) What it buys in practice.** Wall-clock time of the full decode, 24
+  CPU threads. The synthetic 2×5 Mb workload deliberately contains introns
+  shorter than the minimum, exercising the two-pass re-decode path (§2.3);
+  *A. thaliana* is a real ~120 Mb genome, both strands, 24,625 genes. Gene
+  content is byte-identical to the reference decoder in both cases (§8).
 
 ---
 
@@ -145,9 +184,19 @@ flowchart LR
     E2 -- "gene done" --> IG
 ```
 
-*(A simplified backbone — the full machine has 170 states at
-`min_intron_length = 20`; the second CDS arc from `CDS1`/`ASS1` and the
-suffix-matched transitions of §2.1 are omitted for readability.)*
+*Figure 2 — the grammar backbone.* Blue: the CDS phase cycle — a gene body
+is a walk around `CDS0 → CDS1 → CDS2 → CDS0`, one codon per lap; the start
+codon (`ATG`) admits entry from `intergenic`, and the phase must come back to
+the right position when the walk resumes after an intron. Orange: the splice
+arc — a donor site (`GT`) enters the intron counters + motif helpers, walks
+≥ 20 nt, and leaves through an acceptor (`AG`) back into the phase cycle
+*frame-preserved*. Red: the stop path — `TAA`/`TAG` spelled after `CDS2`
+closes the gene and returns to `intergenic`. Omitted for readability: the
+suffix-tagged variants that carry partial codons across the splice arc
+(§2.1), the second donor/acceptor arcs from `CDS1`/`ASS1`, and the N-base
+fallback paths. The full machine instantiates this backbone with
+`min_intron_length` counter levels per suffix family — 170 states at the
+default 20 (Figure 1A).
 
 **Phase tracking across introns.** `CDS0/1/2` encode the position within the
 current codon, and the suffix-tagged variants track the *partial codon
@@ -252,8 +301,17 @@ Concretely, for one symbol's table the memory looks like this:
  exactly matching the reference's for-i-in-0..S-1 loop
 ```
 
-The inner loop therefore scans one contiguous slice per (base, target state),
-and the ascending-source order doubles as the tie-breaking rule (§4.3).
+The inner loop therefore scans one contiguous slice per (base, target state).
+*Listing — anatomy of the edge table (indices illustrative).* Three parallel
+flat arrays replace five S×S matrices: `edge_from`/`edge_w` hold the source
+state and log-weight of every finite edge, concatenated per symbol; `to_ptr`
+is a prefix sum over targets, so `[to_ptr[s, j], to_ptr[s, j+1])` is exactly
+the set of edges **into** target state `j` when the current base is symbol
+`s` — here the four edges `e=7..10`. No search, no masking, no −∞ scan: the
+Viterbi update for one (base, state) pair is a bounded walk over that slice.
+And the within-block ascending-source order is not just a layout choice — it
+*is* the tie-breaking rule of §4.3, so the memory layout and the correctness
+argument are the same artifact.
 
 At `min_intron_length = 20` the five tables contain **879 edges in total**
 (vs. 5 × 28,900 = 144,500 dense cells). Per base only one symbol's table is
