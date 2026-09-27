@@ -47,6 +47,30 @@ per-base posteriors (HDF5)
    → GFF3
 ```
 
+The same pipeline as a diagram — note the lazy re-decode loop (§2.3) and the
+per-process cache that all Viterbi calls share:
+
+```mermaid
+flowchart LR
+    H[("per-base posteriors<br/>(HDF5, both strands)")] --> R["candidate region detection<br/>cumsum window scan + RLE"]
+    R --> P{"any intron &lt; min_intron_length<br/>in decoded result?"}
+    P -- "decode @ min_intron=1" --> V1["Viterbi<br/>sparse edge table"]
+    P -- "yes → re-decode" --> V2["Viterbi<br/>full counter machine"]
+    V1 --> S["gene scoring / filtering<br/>(--min_cds_score)"]
+    V2 --> S
+    C[("process-level cache:<br/>states · 5 matrices · edge table")]
+    C -.-> V1
+    C -.-> V2
+    S --> G["GFF3 output<br/>(deterministic order)"]
+```
+
+![Overview: state inventory, inner-loop reduction, end-to-end benchmark](assets/decoding_figures.png)
+
+The three panels above summarize the whole story quantitatively — where the
+170 states come from (A), what the sparse rewrite saves per base (B), and what
+it buys end-to-end (C) — and the rest of the article walks through each in
+detail.
+
 ---
 
 ## 2. The gene-grammar HMM
@@ -66,7 +90,26 @@ five families:
 | splice helpers | 24 | `intron1_TG_splice0..3` | consume the GT…AG motif inside introns |
 | intron length counters | 120 | `intron0_17`, `intron2_0`, … | enforce `min_intron_length` |
 
-Three design points deserve explanation.
+Three design points deserve explanation. First, the overall shape of the
+grammar — the backbone every path follows (phase cycle in the middle, splice
+arc below, stop path to the right):
+
+```mermaid
+flowchart LR
+    IG["intergenic"] -- "A" --> S0["start0"] -- "T" --> S1["start1"] -- "G" --> S2["start2"]
+    S2 --> C0["CDS0<br/>(phase 0)"]
+    C0 -- "exon continues" --> C1["CDS1"] -- "G" --> C2["CDS2"] -- "exon ends / next codon" --> C0
+    C2 -- "T (stop begins)" --> E0["end0"] -- "A" --> E1["end1_TA / end1_TG"] -- "A | G" --> E2["end2"]
+    E2 -- "gene done" --> IG
+    C0 -- "donor GT.." --> DSS["DSS donor states"]
+    DSS --> IC["intron counter chain<br/>intron{p}_0 … intron{p}_19<br/>(+ _T/_TA/_TG suffix variants)"]
+    IC -- "..AG acceptor" --> ASS["ASS acceptor states"]
+    ASS -- "frame-preserving return" --> C0
+```
+
+*(A simplified backbone — the full machine has 170 states at
+`min_intron_length = 20`; the suffix tags and the second CDS arc from
+`CDS1`/`ASS1` are omitted for readability.)*
 
 **Phase tracking across introns.** `CDS0/1/2` encode the position within the
 current codon. To keep the frame consistent across an intron, the machine must
@@ -150,6 +193,25 @@ to_ptr[s, j]  : edges into target state j under symbol s occupy
 
 Edges are globally concatenated per symbol in **(target, source) ascending**
 order (`np.lexsort((fr, to))`), so `to_ptr` is a plain prefix-sum index.
+Concretely, for one symbol's table the memory looks like this:
+
+```
+                       target state j        target state j+1
+                     ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┬ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+ to_ptr[s, j] ──►    │ e=7  e=8  e=9  e=10 │ e=11 e=12 ...
+                     │ (from, w) pairs ...  │
+ edge_from  [ 7] =    3     41    77   112     5    88   ...
+ edge_w     [ 7] =  -2.1  -0.4  -3.7  -2.1   -0.4  -5.0  ...
+                     └ ─ ─ ─ ─ ▲ ─ ─ ─ ─ ─ ┴ ─ ─ ─ ─ ▲ ─ ─ ─ ┘
+                        to_ptr[s, j]        to_ptr[s, j+1]
+
+ within a target block, edges are sorted by source index ascending —
+ the FIRST (lowest) source wins ties under the strict ">" update,
+ exactly matching the reference's for-i-in-0..S-1 loop
+```
+
+The inner loop therefore scans one contiguous slice per (base, target state),
+and the ascending-source order doubles as the tie-breaking rule (§4.3).
 
 At `min_intron_length = 20` the five tables contain **879 edges in total**
 (vs. 5 × 28,900 = 144,500 dense cells). Per base only one symbol's table is
