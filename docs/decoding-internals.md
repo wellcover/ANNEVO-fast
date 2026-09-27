@@ -15,7 +15,7 @@
 
 This article explains the algorithms and engineering behind the decoding half
 of ANNEVO-Fast (`decoding.py`, `src/HMM.py`, `src/gene_decoding.py`). It is
-written to be read top-to bottom by someone who knows what a genome and a
+written to be read top-to-bottom by someone who knows what a genome and a
 neural network are; every piece of jargon is defined the first time it
 appears, and each section leads with the intuition before the detail.
 
@@ -100,7 +100,7 @@ intergenic desert. ② The first pass decodes with the counter chains
 collapsed (`min_intron = 1`) — smaller machine, unconstrained optimum. ③ The
 result is scanned for introns below the requested minimum; if none exist —
 the common case — the path is already final and ②′ is skipped entirely
-(§2.3). ④ Genes are scored and filtered (`--min_cds_score`, §6) and ⑤
+(§2.2). ④ Genes are scored and filtered (`--min_cds_score`, §6) and ⑤
 written in deterministic order. The dashed grey cache holds the state tables,
 the five conditional matrices and the compiled edge table; it is built once
 per worker process and shared by every Viterbi call (§4.4), which is what
@@ -137,7 +137,7 @@ to bottom:
 
 - **(D) What it buys in practice.** Wall-clock time of the full decode, 24
   CPU threads. The synthetic 2×5 Mb workload deliberately contains introns
-  shorter than the minimum, exercising the two-pass re-decode path (§2.3);
+  shorter than the minimum, exercising the two-pass re-decode path (§2.2);
   *A. thaliana* is a real ~120 Mb genome, both strands, 24,625 genes. Gene
   content is byte-identical to the reference decoder in both cases (§8).
 
@@ -168,7 +168,7 @@ At `min_intron_length = 20` the machine has **170 states** in seven families:
 | start codon | 3 | `start0..start2` | spells ATG |
 | CDS, phase-tracked | 6 | `CDS0`, `CDS0_T`, `CDS1`, `CDS1_TA`, `CDS1_TG`, `CDS2` | exon body, position within the codon |
 | donor/acceptor motifs | 12 | `DSS0`, `DSS1_TA`, `ASS2`, … | spell GT…AG around splice sites |
-| stop codon | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA/TAG |
+| stop codon | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA / TAG / TGA |
 | splice helpers | 24 | `intron1_TG_splice0..3` | consume the GT…AG motif inside introns |
 | intron length counters | 120 | `intron0_17`, `intron2_0`, … | enforce `min_intron_length` |
 
@@ -193,7 +193,7 @@ flowchart LR
         DSS["DSS donor states<br/>+ suffix variants"]:::splc --> IC["intron counters + helpers<br/>intron0 … intron19<br/>(_T / _TA / _TG variants)"]:::splc --> ASS["ASS acceptor states"]:::splc
     end
 
-    subgraph STOP[" stop codon — TAA / TAG "]
+    subgraph STOP[" stop codon — TAA / TAG / TGA "]
         E0["end0 · T"]:::stpc --> E1["end1_TA / end1_TG · A"]:::stpc --> E2["end2 · A / G"]:::stpc
     end
 
@@ -211,7 +211,7 @@ codon (`ATG`) admits entry from `intergenic`, and the phase must come back to
 the right position when the walk resumes after an intron. Orange: the splice
 arc — a donor site (`GT`) enters the intron counters + motif helpers, walks
 ≥ 20 nt, and leaves through an acceptor (`AG`) back into the phase cycle
-*frame-preserved*. Red: the stop path — `TAA`/`TAG` spelled after `CDS2`
+*frame-preserved*. Red: the stop path — `TAA`/`TAG`/`TGA` spelled after `CDS2`
 closes the gene and returns to `intergenic`. Omitted for readability: the
 suffix-tagged variants that carry partial codons across the splice arc
 (§2.1), the second donor/acceptor arcs from `CDS1`/`ASS1`, and the N-base
@@ -235,8 +235,8 @@ half-written codon existed before the donor is finished after the acceptor,
 so the frame — and stop-codon recognition — resume on the right bases.
 
 **Stops.** Stop codons are spelled by the dedicated red chain: `CDS2 → end0`
-on T (the next in-frame codon starts with T), then `end0 → end1_TA` /
-`end1_TG` on A/G, then `end1 → end2`. An acceptor exit can also begin a
+on T (the next in-frame codon starts with T), then `end0 → end1_TA` on A or `end1_TG` on G, then `end1 → end2`
+(A completes TAA/TAG from `end1_TA`, and TGA from `end1_TG`). An acceptor exit can also begin a
 stop directly (`intron2_splice3 → end0` on T — a phase-2 intron has already
 finished its codon at the acceptor, so the next base starts a fresh one),
 and `end2 → intergenic` closes the gene.
@@ -260,7 +260,7 @@ genes.
 state's class (floored at ε = 1e-3 and logged) — the machine's scores come
 from the rulebook, its "evidence" from the network.
 
-### 2.3 Two-pass decoding
+### 2.2 Two-pass decoding
 
 Enforcing `min_intron_length` with counter states can *force* a worse path
 when the unconstrained best path contains no short intron at all (the
@@ -287,8 +287,8 @@ its time checking moves that are illegal — like finding the previous
 station on a subway line by phoning *every* station in the city, when the
 map plainly lists the two or three that connect.
 
-Three multipliers made it worse in the reference pipeline: the dense inner
-loop itself; five S×S matrices rebuilt in Python loops **for every candidate
+On top of the dense loop itself, two aggravators made the reference
+pipeline worse: five S×S matrices rebuilt in Python loops **for every candidate
 region**, although they depend only on five parameters; and per-base
 dictionary lookups for encoding.
 
@@ -330,7 +330,7 @@ Concretely, for one symbol's table the memory looks like this:
 At `min_intron_length = 20` the five rulebooks contain **879 legal moves in
 total** (vs. 5 × 28,900 = 144,500 dense cells). Per base only the current
 nucleotide's rulebook is consulted — on average **~176 move visits per
-base** instead of 28,900 state-pair comparisons, an ~160× reduction of the
+base** instead of 28,900 state-pair comparisons, a ≈164× reduction of the
 inner loop (Figure 1C).
 
 *Listing — anatomy of the edge table (indices illustrative).* Three parallel
