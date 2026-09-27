@@ -2,18 +2,43 @@
 
 *How a gene-grammar HMM is made 3–5× faster without changing a single base of its output.*
 
-This article explains the algorithms and engineering behind the decoding half of
-ANNEVO-Fast (`decoding.py`, `src/HMM.py`, `src/gene_decoding.py`): what the hidden
-Markov model does, why its Viterbi decode was the bottleneck, how the sparse-edge
-rewrite works, what "bit-exact equivalence" actually guarantees and how it is
-enforced, and where the remaining runtime goes.
+> **Too long; didn't read.** A neural network labels every base of a genome
+> ("this is exon", "this is a splice site", …), but its answers are slightly
+> noisy, and noise destroys genes. A hand-built state machine — the HMM —
+> cleans this up by only allowing *grammatically legal* genes. Running that
+> machine was slow because the textbook algorithm compares every state
+> against every other state at every base. But the machine's rulebook is
+> almost empty: from any state, only a handful of moves are legal. ANNEVO-Fast
+> pre-computes the legal moves into a lookup table, cuts the inner loop by
+> ~164×, and — the hard part — produces *exactly* the same output as before,
+> bit for bit.
+
+This article explains the algorithms and engineering behind the decoding half
+of ANNEVO-Fast (`decoding.py`, `src/HMM.py`, `src/gene_decoding.py`). It is
+written to be read top-to bottom by someone who knows what a genome and a
+neural network are; every piece of jargon is defined the first time it
+appears, and each section leads with the intuition before the detail.
 
 All numbers below are measured on the code in this repository
 (`min_intron_length = 20` unless stated otherwise).
 
+### A one-minute glossary
+
+| Term | Plain meaning in this context |
+|---|---|
+| *posterior* | the network's confidence, per base, for each of the 15 label classes ("87% exon, 3% intron, …") |
+| *HMM* (hidden Markov model) | a state machine: a box of **states** plus a rulebook of **allowed moves** between them |
+| *state* | one node of the machine ("currently inside an intron, 7 bases in") |
+| *transition* | one legal move, with a score (e.g. "stay in intron: −0.05") |
+| *emission* | the score for "state X agrees with the network's label at this base" |
+| *Viterbi* | dynamic programming: the classic algorithm that finds the single best-scoring legal path through the machine, base by base |
+
 ---
 
 ## 1. What the decoder solves
+
+Think of the neural network as a very fast, 98%-accurate typist, and the
+decoder as its grammar checker.
 
 An ANNEVO-style model outputs, for every genome base and both strands, a
 posterior distribution over 15 label classes (shown in the model's training
@@ -27,33 +52,21 @@ label order):
 4  Intron_0         9  DSS_2           14 end
 ```
 
-One subtlety that bites anyone touching the emission code: the decoder applies
-a **fixed column permutation** when feeding these posteriors to the HMM state
-groups — for every phase-structured family the two non-zero phases are swapped
-between the label naming and the HMM phase groups (e.g. the HMM's
-`CODING_EXON_1` states read prediction *column 3*, `DSS_1` reads column 9,
-`ASS_2` reads column 11). The mapping is hard-coded in `viterbi_decoding` and
-must match the checkpoint's training convention.
+98% accuracy sounds excellent — but the 2% of wrong bases are scattered at
+random, and a gene is only correct if *every one of its bases* is right.
+Taken literally (per-base argmax), the raw output contains genes with
+3-base introns, donor sites with no acceptor, and reading frames that jump
+arbitrarily between exons. None of these can exist in biology, so none
+should exist in the output.
 
-Per-base argmax is not enough to produce gene structures. The raw posteriors
-satisfy the *gene grammar* only statistically: an argmax path can contain an
-intron that is 3 bp long, a donor site not followed by an acceptor, a CDS phase
-that jumps arbitrarily between exons. The decoder's job is to find the
-**highest-scoring path that is grammatically legal** — this is exactly a
-Viterbi decode over a hand-designed HMM whose topology encodes eukaryotic gene
-structure.
+The decoder therefore finds the **highest-scoring path that is grammatically
+legal**: it may flip some low-confidence bases to keep the story coherent,
+but it may never break the rules. That is precisely what Viterbi decoding
+over a hand-designed HMM computes.
 
-The pipeline in one sentence:
-
-```
-per-base posteriors (HDF5)
-   → candidate genic regions (cheap thresholds)
-   → per-region Viterbi over the grammar HMM
-   → gene scoring / filtering
-   → GFF3
-```
-
-The same pipeline as a diagram:
+The pipeline in one sentence: *threshold the posteriors to find candidate
+regions, decode each region through the grammar machine, score and filter the
+genes, write GFF3.* As a diagram:
 
 ```mermaid
 flowchart LR
@@ -128,28 +141,36 @@ to bottom:
   *A. thaliana* is a real ~120 Mb genome, both strands, 24,625 genes. Gene
   content is byte-identical to the reference decoder in both cases (§8).
 
+One practical subtlety for anyone touching the emission code: the decoder
+applies a **fixed column permutation** when feeding posteriors to the HMM
+state groups — for every phase-structured family the two non-zero phases are
+swapped between the label naming and the HMM phase groups (e.g. the HMM's
+`CODING_EXON_1` states read prediction *column 3*, `DSS_1` reads column 9,
+`ASS_2` reads column 11). The mapping is hard-coded in `viterbi_decoding`
+and must match the checkpoint's training convention.
+
 ---
 
 ## 2. The gene-grammar HMM
 
+The machine works like a board game with 170 squares (states) and a rulebook
+that says which square may follow which, with a score for each legal move.
+Walking the board base-by-base spells out a gene; Viterbi (§3) finds the
+highest-scoring legal walk. The rulebook *is* the biology.
+
 ### 2.1 State inventory
 
-At `min_intron_length = 20` the machine has **170 states**. They fall into
-five families:
+At `min_intron_length = 20` the machine has **170 states** in seven families:
 
 | Family | Count | Examples | Role |
 |---|---|---|---|
-| intergenic | 1 | `intergenic` | background |
+| intergenic | 1 | `intergenic` | between genes |
 | start codon | 3 | `start0..start2` | spells ATG |
-| CDS, phase-tracked | 6 | `CDS0`, `CDS0_T`, `CDS1`, `CDS1_TA`, `CDS1_TG`, `CDS2` | exon body in reading frame 0/1/2 |
+| CDS, phase-tracked | 6 | `CDS0`, `CDS0_T`, `CDS1`, `CDS1_TA`, `CDS1_TG`, `CDS2` | exon body, position within the codon |
 | donor/acceptor motifs | 12 | `DSS0`, `DSS1_TA`, `ASS2`, … | spell GT…AG around splice sites |
-| stop codon | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA/TAG/TGA |
+| stop codon | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA/TAG |
 | splice helpers | 24 | `intron1_TG_splice0..3` | consume the GT…AG motif inside introns |
 | intron length counters | 120 | `intron0_17`, `intron2_0`, … | enforce `min_intron_length` |
-
-Three design points deserve explanation. First, the overall shape of the
-grammar — the backbone every path follows (phase cycle in the middle, splice
-arc below, stop path to the right):
 
 ```mermaid
 flowchart LR
@@ -198,92 +219,97 @@ fallback paths. The full machine instantiates this backbone with
 `min_intron_length` counter levels per suffix family — 170 states at the
 default 20 (Figure 1A).
 
-**Phase tracking across introns.** `CDS0/1/2` encode the position within the
-current codon, and the suffix-tagged variants track the *partial codon
-itself*: `CDS1_TA` means "phase-1 position, codon so far reads TA". The
-suffixes propagate along the whole splice arc — CDS → donor → intron →
-acceptor — through suffix-matched transitions, e.g.
+Three design points deserve explanation.
+
+**Keeping the reading frame across an intron.** A gene is read in
+three-base codons, and an intron can interrupt a gene *between any two
+bases* — even in the middle of a codon. When the machine walks into an
+intron, it must remember how much of the current codon it has already seen,
+or the frame will be wrong after the acceptor. It does this with suffix
+tags: `CDS1_TA` means "codon position 1, and the codon so far reads TA".
+The tags travel along the whole splice arc — CDS → donor → intron →
+acceptor — through suffix-matched moves, for example
 `CDS0_T --A--> DSS1_TA`, `DSS0_T --G--> intron0_T_splice0`,
-`intron0_T_splice3 --A--> ASS1_TA`, `ASS1_TA --T--> CDS2`. A partial codon
-begun before the donor is therefore completed after the acceptor: the reading
-frame survives the intron, and stop recognition resumes on the right bases.
+`intron0_T_splice3 --A--> ASS1_TA`, `ASS1_TA --T--> CDS2`. Whatever
+half-written codon existed before the donor is finished after the acceptor,
+so the frame — and stop-codon recognition — resume on the right bases.
 
-Stops themselves are spelled by the dedicated `end` chain: `CDS2 → end0` on T
-(the next in-frame codon starts with T), `end0 → end1_TA`/`end1_TG` on A/G,
-`end1_* → end2`. An acceptor exit can also start a stop directly
-(`intron2_splice3 → end0` on T — the phase-2 intron has completed its codon at
-the acceptor, so the next base begins a fresh one), and `end2 → intergenic`
-closes the gene.
+**Stops.** Stop codons are spelled by the dedicated red chain: `CDS2 → end0`
+on T (the next in-frame codon starts with T), then `end0 → end1_TA` /
+`end1_TG` on A/G, then `end1 → end2`. An acceptor exit can also begin a
+stop directly (`intron2_splice3 → end0` on T — a phase-2 intron has already
+finished its codon at the acceptor, so the next base starts a fresh one),
+and `end2 → intergenic` closes the gene.
 
-**Intron length counters.** A hard minimum intron length cannot be enforced by
-emissions; it needs topology. The machine instantiates `min_intron_length`
-counter states per suffix family (`intron0_0 … intron0_19`), forming chains
-that make any intron shorter than the minimum topologically impossible. This
-is the single biggest multiplier on state count (120 of the 170 states).
+**Minimum intron length needs topology, not hints.** You cannot enforce
+"introns must be ≥ 20 nt" with scores alone — the clean way is to make
+short introns *unrepresentable*: 20 counter states in a row, each with
+exactly one successor. Any legal walk through them takes at least 20 steps.
+This is why the counters are 120 of the 170 states (Figure 1A), and why the
+machine grows linearly with `min_intron_length`.
 
-**Nucleotide-conditional transitions.** There are **five** separate S×S
-transition matrices — one each for the current base being A, T, C, G, and N.
-The grammar is DNA-aware: `start1 → start2` fires only on G (completing ATG),
-donor entry fires only on G after DSS, the GC-AG donor pays a penalty on C,
-and so on. Under N (ambiguous base) every conditional path opens with a fixed
-−10 penalty so assembly gaps degrade gracefully.
+**Nucleotide-conditional moves.** There are **five** rulebooks (transition
+matrices) — one each for the current base being A, T, C, G, or N — because
+the grammar is DNA-aware: `start1 → start2` fires only on G (completing
+ATG), donors enter only on G, and the GC-AG donor pays a penalty on C. Under
+N (an ambiguous base, common in assemblies) every conditional move opens
+with a fixed −10 penalty, so gaps degrade gracefully instead of breaking
+genes.
 
-### 2.2 Emissions
-
-Emissions are not learned: each state simply reads the model's posterior for
-its class group (`columns_dict` maps the 15 classes onto state groups, e.g.
-`CODING_EXON_1 ← CDS1, CDS1_TA, CDS1_TG`), floored at ε = 1e-3 and logged.
-Transition weights are also fixed log-probabilities derived from expected
-exon/intron lengths (`log(1 − 1/E)`, `log(1/E)`), plus motif penalties.
+**Emissions.** Emission scores are simply the network's posteriors for the
+state's class (floored at ε = 1e-3 and logged) — the machine's scores come
+from the rulebook, its "evidence" from the network.
 
 ### 2.3 Two-pass decoding
 
 Enforcing `min_intron_length` with counter states can *force* a worse path
-when the unconstrained best path contains no short intron at all. The decoder
-therefore decodes twice: first with `min_intron_length = 1` (counter chains
-collapsed), then — only if the result actually contains an intron shorter
-than the target — re-decodes with the full counter machine
-(`decode_gene_structure`). In practice the second pass is rare, and skipping
-it when unnecessary is both faster and slightly more accurate.
+when the unconstrained best path contains no short intron at all (the
+counters make the machine stiffer than necessary). The decoder therefore
+decodes twice: first with `min_intron_length = 1` (counters collapsed),
+then — only if the result actually contains an intron shorter than the
+target — re-decodes with the full counter machine
+(`decode_gene_structure`). In practice the second pass is rare; skipping it
+when unnecessary is both faster and slightly more accurate.
 
 ---
 
 ## 3. The bottleneck: dense Viterbi
 
-Textbook Viterbi over S states is O(L·S²): for every base, for every target
-state, maximize over all S predecessor states. With S = 170 that is
-**28,900 candidate comparisons per base, per strand** — and the vast majority
-are comparisons against −∞ weights that can never win, because the grammar is
-extremely sparse: almost every state has only **1–4 legal predecessors**.
+The textbook Viterbi update asks, at every base: *for each state I could be
+in now, which previous state gave the best score?* With S states that is
+S × S comparisons per base. With S = 170: **28,900 comparisons per base,
+per strand** — for a 10 Mb chromosome, on the order of 3×10¹¹ comparisons.
 
-The dense formulation wastes the work three times over:
+Here is the waste: the rulebook is almost empty (Figure 1B). From a typical
+state only **1–4 moves are legal**; all other 166-odd "previous states"
+have weight −∞ and can never win. The dense algorithm spends almost all of
+its time checking moves that are illegal — like finding the previous
+station on a subway line by phoning *every* station in the city, when the
+map plainly lists the two or three that connect.
 
-1. the inner maximization scans all S predecessors although only a handful are
-   finite;
-2. the five conditional matrices are S×S each, so any per-region
-   (re)construction in Python loops is itself expensive;
-3. in the reference pipeline the matrices were rebuilt for **every candidate
-   region**, although they depend only on
-   `(min_intron_length, expect_exon, expect_intron, gcag, atac)`.
+Three multipliers made it worse in the reference pipeline: the dense inner
+loop itself; five S×S matrices rebuilt in Python loops **for every candidate
+region**, although they depend only on five parameters; and per-base
+dictionary lookups for encoding.
 
 ---
 
-## 4. The core rewrite: sparse-edge Viterbi, O(L·E)
+## 4. The fix: pre-compute the legal moves — O(L·E)
 
 ### 4.1 The data structure
 
-Extract the finite entries of the five transition matrices into a flat,
-CSR-like edge table:
+Instead of five S×S grids, keep one flat list of the legal moves — the
+subway map itself, in a form the inner loop can walk without thinking:
 
 ```
-edge_from[e]  : source state of edge e        (int32)
-edge_w[e]     : log transition weight of e    (float32)
-to_ptr[s, j]  : edges into target state j under symbol s occupy
-                the contiguous range [to_ptr[s, j], to_ptr[s, j+1])
+edge_from[e]  : source state of move e        (int32)
+edge_w[e]     : score of move e               (float32)
+to_ptr[s, j]  : moves INTO target state j, when the current base is symbol s,
+                occupy the contiguous range [to_ptr[s, j], to_ptr[s, j+1])
 ```
 
-Edges are globally concatenated per symbol in **(target, source) ascending**
-order (`np.lexsort((fr, to))`), so `to_ptr` is a plain prefix-sum index.
+Moves are concatenated per symbol in **(target, source) ascending** order
+(`np.lexsort((fr, to))`), so `to_ptr` is a plain prefix-sum index.
 Concretely, for one symbol's table the memory looks like this:
 
 ```
@@ -296,27 +322,27 @@ Concretely, for one symbol's table the memory looks like this:
                      └ ─ ─ ─ ─ ▲ ─ ─ ─ ─ ─ ┴ ─ ─ ─ ─ ▲ ─ ─ ─ ┘
                         to_ptr[s, j]        to_ptr[s, j+1]
 
- within a target block, edges are sorted by source index ascending —
+ within a target block, moves are sorted by source index ascending —
  the FIRST (lowest) source wins ties under the strict ">" update,
  exactly matching the reference's for-i-in-0..S-1 loop
 ```
 
-The inner loop therefore scans one contiguous slice per (base, target state).
-*Listing — anatomy of the edge table (indices illustrative).* Three parallel
-flat arrays replace five S×S matrices: `edge_from`/`edge_w` hold the source
-state and log-weight of every finite edge, concatenated per symbol; `to_ptr`
-is a prefix sum over targets, so `[to_ptr[s, j], to_ptr[s, j+1])` is exactly
-the set of edges **into** target state `j` when the current base is symbol
-`s` — here the four edges `e=7..10`. No search, no masking, no −∞ scan: the
-Viterbi update for one (base, state) pair is a bounded walk over that slice.
-And the within-block ascending-source order is not just a layout choice — it
-*is* the tie-breaking rule of §4.3, so the memory layout and the correctness
-argument are the same artifact.
+At `min_intron_length = 20` the five rulebooks contain **879 legal moves in
+total** (vs. 5 × 28,900 = 144,500 dense cells). Per base only the current
+nucleotide's rulebook is consulted — on average **~176 move visits per
+base** instead of 28,900 state-pair comparisons, an ~160× reduction of the
+inner loop (Figure 1C).
 
-At `min_intron_length = 20` the five tables contain **879 edges in total**
-(vs. 5 × 28,900 = 144,500 dense cells). Per base only one symbol's table is
-consulted — on average **~176 edge visits per base** instead of 28,900 state
-pairs, an ~160× reduction of the inner loop.
+*Listing — anatomy of the edge table (indices illustrative).* Three parallel
+flat arrays replace five S×S grids: `edge_from`/`edge_w` hold the source
+state and score of every legal move, concatenated per symbol; `to_ptr` is a
+prefix sum over targets, so `[to_ptr[s, j], to_ptr[s, j+1])` is exactly the
+set of moves **into** target state `j` when the current base is symbol `s` —
+here the four moves `e=7..10`. No search, no masking, no −∞ scan: the
+Viterbi update for one (base, state) pair is a bounded walk over that slice.
+And the within-block ascending-source order is not just a layout choice —
+it *is* the tie-breaking rule of §4.3, so the memory layout and the
+correctity argument are the same artifact.
 
 ### 4.2 The kernel
 
@@ -336,57 +362,53 @@ def _viterbi_core_sparse_f32(log_emit_probs, edge_from, edge_weight, to_ptr, seq
             path[t, to_state] = best_from
 ```
 
-This is a tight scalar loop over contiguous memory — exactly the shape numba
-compiles well, and exactly the shape that a dense `numpy` row-max cannot
-express without materializing S×S intermediates.
-
-Two precision variants are compiled (`f32` for regions ≤ 1 Mb, `f64` above),
-mirroring the reference decoder's dtype choice so that results remain
+The inner loop is a tight walk over contiguous memory — exactly the shape
+the numba JIT compiler turns into fast machine code, and exactly the shape
+a dense `numpy` row-max cannot express without materializing S×S
+intermediates. Two precision variants are compiled (f32 for regions ≤ 1 Mb,
+f64 above), mirroring the reference decoder's dtype choice so results stay
 identical in both regimes.
 
 ### 4.3 Making it bit-exact — the actual constraints
 
-Speed was never the hard part; **identical output** was. Three rules make the
-sparse kernel produce the same `dp` values, the same backpointers, and hence
-the same decoded path as the dense reference, bit for bit:
+Speed was never the hard part; **identical output** was. Anyone can write a
+faster decoder that is *almost* the same; the requirement here was that
+downstream tooling sees the same genes as before. Three rules make the
+sparse kernel produce the same scores, the same backpointers, and hence the
+same decoded path as the dense reference — not statistically, but bit for
+bit:
 
-1. **Evaluation order.** The candidate score is computed as
-   `(dp_prev + w) + emit` — the same left-to-right association as the
-   reference's dense loop. Floating-point addition is not associative, so any
-   other grouping could flip a comparison somewhere.
-2. **Tie-breaking.** Within a target state, edges are sorted by source index
-   ascending and the update uses strict `>`. The first (lowest-index) source
-   wins ties — which is precisely what the reference's `for i in 0..S-1` loop
-   with strict `>` produces.
-3. **Deterministic construction.** The edge table is built by a fixed
-   `lexsort`, so process restarts produce identical layouts.
-
-With those three rules the sparse result is not merely statistically
-equivalent — `np.array_equal` on decoded paths holds for arbitrary inputs.
-This is what allows the decoder to be swapped in as a drop-in replacement:
-downstream tooling that consumed the reference GFFs sees the same genes.
+1. **Add in the same order.** The candidate score is computed as
+   `(dp_prev + w) + emit` — the same left-to-right grouping as the
+   reference. Floating-point addition rounds differently depending on
+   grouping, and a one-ulp difference at base 4,000,001 can flip a path.
+2. **Break ties the same way.** When two moves score *exactly* equally,
+   both implementations keep the one from the smallest-numbered state: the
+   reference got this implicitly from looping `i = 0..S-1` with a strict
+   `>`; the sparse table reproduces it by sorting moves by source index and
+   using the same strict `>`.
+3. **Build the table deterministically.** The `lexsort` construction is a
+   pure function of its parameters, so every process builds the identical
+   table.
 
 ### 4.4 Everything else is cached
 
-State tables, the five transition matrices, and the compiled edge table are
-built once per process and memoized on
-`(min_intron_length, expect_exon, expect_intron, gcag, atac)`
-(`_HMM_ARTIFACTS_CACHE`); numba kernels are cached on disk (`cache=True`) so
-worker processes forked by the `ProcessPoolExecutor` pay neither the JIT nor
-the table construction. The reference rebuilt the matrices per region.
-
-Base encoding is a 256-entry LUT over the raw ASCII buffer
-(`np.frombuffer`) instead of a per-base dictionary lookup — a small thing
-that matters at 10⁷ bases per chromosome.
+The states, the five rulebooks, and the compiled edge table are built once
+per process and memoized on
+`(min_intron_length, expect_exon, expect_intron, gcag, atac)` — the
+reference rebuilt them per region. numba kernels are cached on disk
+(`cache=True`), so the workers of the process pool pay neither the JIT nor
+the construction. Base encoding is a 256-entry lookup table over the raw
+ASCII buffer instead of a per-base dictionary — small, but it matters at
+10⁷ bases per chromosome.
 
 ---
 
 ## 5. Vectorizing everything around the kernel
 
-The Viterbi rewrite would have been pointless if the rest of the pipeline
-stayed in Python loops. `gene_decoding.py` reworks each stage with numpy,
-under the same equivalence discipline (identical arithmetic order where sums
-are involved):
+Rewriting Viterbi would have been pointless if the rest of the pipeline
+stayed in Python loops. Each stage was reworked with numpy under the same
+"same result, bit for bit" discipline:
 
 | Stage | Reference | This repo |
 |---|---|---|
@@ -398,36 +420,31 @@ are involved):
 | H5 access | one file open per segment | one open per 16-segment batch |
 | output order | process-completion order (nondeterministic) | chromosomes in lexicographic order |
 
-The float64 detail in the last-but-two rows is the same story as §4.3 in
-miniature: gene scores are sums of millions of posteriors, and a
-pairwise-parallel reduction (`np.sum`) can round differently than the
-reference's sequential accumulation — which could flip a gene across the
-`--min_cds_score` filter. The sequential `cumsum`-then-take-last formulation
-keeps the sums bit-identical.
-
-Parallelism is a flat `ProcessPoolExecutor` over batches of candidate
-regions; the per-worker caches of §4.4 make each worker hot after its first
-batch.
+The float64 row is §4.3 in miniature: a gene score is a sum of millions of
+posteriors, and numpy's default `sum` (pairwise) rounds differently than the
+reference's sequential accumulation — enough to flip a gene across the
+`--min_cds_score` filter. The `cumsum`-then-take-last formulation keeps the
+sums identical. Parallelism is a flat `ProcessPoolExecutor` over batches of
+regions; after the first batch, every worker is hot (§4.4).
 
 ---
 
 ## 6. Knobs that trade a little speed for accuracy
 
-Three optional behaviors leave the historical default path completely
-unchanged but can be enabled at the CLI:
+Three optional behaviors; the first two leave the default output completely
+unchanged:
 
-- **`--atac_penalty <x>`** — adds AT-AC (U12-type minor splice) helper states
-  (`intron{p}_ATAC_splice{0,1,3}`): donor preceded by AT, acceptor ending in
-  C. Nine extra states per machine; the stop-codon suffix tracking is
-  approximated away on this path (≈0.1% of introns).
-- **`--gcag_penalty`** — the extra log penalty of GC-AG donors relative to
-  canonical GT (default 10, the historical value; it is a transition-weight
-  offset in the C-conditional matrix, visible in §2.1's suffix machinery).
+- **`--atac_penalty <x>`** — adds AT-AC (U12-type minor splice) states:
+  donors preceded by AT, acceptors ending in C. Nine extra states; the
+  reading-frame bookkeeping is approximated away on this path (≈0.1% of
+  introns).
+- **`--gcag_penalty`** — extra log penalty of GC-AG donors relative to
+  canonical GT (default 10, the historical value).
 - **`--min_cds_score`** — mean per-base emission score a gene must reach
-  (single-exon and short genes face 1.5×). The default 0.6 (vs the historical
-  0.5) was re-calibrated on plant benchmarks and is worth **+0.2–0.4 pp gene
-  F1**. Unlike the two above it changes output by design; set it to 0.5 to
-  reproduce historical filtering.
+  (single-exon and short genes face 1.5×). The default 0.6 (vs the
+  historical 0.5) was re-calibrated on plant benchmarks and is worth
+  **+0.2–0.4 pp gene F1**. Unlike the two above it changes output by
+  design; set it to 0.5 to reproduce historical filtering.
 
 ---
 
@@ -440,34 +457,34 @@ unchanged but can be enabled at the CLI:
 | Synthetic 2×5 Mb, 6,047 genes (exercises the short-intron re-decode path) | 17.9 s | 3.4 s | **5.3×** |
 | *Arabidopsis thaliana* whole genome, 24,625 genes | 59.4 s | 22.3 s | **2.7×** |
 
-Why does a ~160× reduction of the inner loop yield "only" 2.7–5.3×? Because
-after the rewrite the profile rebalances: H5 I/O, region detection, GFF
-formatting, process-pool overhead, and the *unavoidable* O(L·E) scan dominate.
-The dense comparison count was so large that the reference was largely
-memory-bandwidth-bound on matrices full of −∞; the sparse kernel is small and
-fast, and the remaining wall time is honest work elsewhere. On fragmented
-draft assemblies the *predictor* side (cross-scaffold chunked batching) is
-the larger lever — see the README.
+Why does a ~164× smaller inner loop yield "only" 2.7–5.3× end-to-end?
+Because after the rewrite, the inner loop is simply gone from the profile:
+the remaining time is reading the H5 posteriors, finding candidate regions,
+formatting and writing GFF, and process-pool overhead. Shrinking something
+that is no longer the bottleneck cannot shrink the total further — the
+familiar Amdahl's law. (On fragmented draft assemblies the *predictor* side
+— cross-scaffold chunked batching — is the bigger lever; see the README.)
+
+---
 
 ## 8. Verifying a rewrite like this
 
 The equivalence claim rests on three layers, in increasing strength:
 
-1. **Unit-level determinism** — edge-table construction is a pure function of
-   its cache key; decoded paths are reproducible across runs and processes.
-2. **Differential testing on synthetic data** — a generator producing
-   genomes with known ground truth, deliberately including introns shorter
-   than `min_intron_length` to trigger the re-decode path, GFFs compared
-   byte-for-byte.
+1. **Determinism by construction** — the edge table is a pure function of
+   its parameters; decoded paths are reproducible across runs and processes.
+2. **Differential testing on synthetic data** — genomes with known ground
+   truth, deliberately including introns shorter than `min_intron_length`
+   to force the re-decode path; GFFs compared byte-for-byte.
 3. **Whole-genome differential runs** — real *A. thaliana*: 24,625 genes on
-   both strands; all gene content lines identical between reference and this
-   decoder (only the order of the per-sequence comment blocks differed — the
-   reference emitted them in process-completion order, which was itself
-   nondeterministic run-to-run; this repo emits lexicographic order).
+   both strands; all gene content lines identical between reference and
+   this decoder. (Only the order of per-sequence comment blocks differed —
+   the reference emitted them in process-completion order, which was itself
+   nondeterministic run to run; this repo emits lexicographic order.)
 
-Rule 3 deserves emphasis for anyone porting this approach: **"the same
-answer" must be defined including tie-breaking and float rounding**, or the
-diff will be full of mysterious one-base shifts that are really just
+Layer 3 carries a lesson for anyone porting this approach: **define "the
+same answer" to include tie-breaking and floating-point rounding**, or your
+diff will fill with one-base shifts that are really just
 different-but-equally-optimal paths.
 
 ---
@@ -476,7 +493,7 @@ different-but-equally-optimal paths.
 
 | Aspect | Reference | This repo |
 |---|---|---|
-| Viterbi inner loop | O(L·S²), dense, ~28,900 comparisons/base | O(L·E), sparse CSR edge table, ~176 edge visits/base |
+| Viterbi inner loop | O(L·S²) dense — ~28,900 comparisons/base | O(L·E) sparse edge table — ~176 move visits/base |
 | Transition tables | rebuilt per region | built once per process, memoized; numba disk cache |
 | Precision policy | f32 / f64 per region length | same, both kernels compiled |
 | Equivalence | — | bit-exact paths (fixed evaluation order + ascending-source tie-breaking) |
@@ -485,8 +502,8 @@ different-but-equally-optimal paths.
 | Output | nondeterministic section order | deterministic lexicographic |
 | Extras | — | AT-AC path, GC-AG knob, calibrated CDS filter |
 
-The general lesson generalizes beyond gene finding: **structured HMMs are
-almost always sparse, and their sparsity is invisible to a dense
-implementation.** Extracting the grammar into an edge table — with deliberate
-control of evaluation order and tie-breaking — turns an O(S²) kernel into
-O(E) while *strengthening*, not weakening, the reproducibility guarantee.
+The general lesson travels beyond gene finding: **a structured HMM is almost
+always sparse, and a dense implementation is blind to that sparsity.**
+Writing the rulebook down as an edge table — with deliberate control of
+summation order and tie-breaking — turns an O(S²) kernel into O(E) while
+*strengthening*, not weakening, the reproducibility guarantee.
