@@ -16,18 +16,24 @@ All numbers below are measured on the code in this repository
 ## 1. What the decoder solves
 
 An ANNEVO-style model outputs, for every genome base and both strands, a
-posterior distribution over 15 label classes:
+posterior distribution over 15 label classes (shown in the model's training
+label order):
 
 ```
-0  Intergenic       5  Intron_2        10 ASS_0   (acceptor, phase 0)
-1  Coding_exon_0    6  Intron_1        11 ASS_2
-2  Coding_exon_2    7  DSS_0           12 ASS_1
-3  Coding_exon_1    8  DSS_2           13 start
-4  Intron_0         9  DSS_1           14 end
+0  Intergenic       5  Intron_1        10 ASS_0   (acceptor)
+1  Coding_exon_0    6  Intron_2        11 ASS_1
+2  Coding_exon_1    7  DSS_0           12 ASS_2
+3  Coding_exon_2    8  DSS_1           13 start
+4  Intron_0         9  DSS_2           14 end
 ```
 
-(The class order is historical — note the swapped phase-1/phase-2 entries; the
-emission mapping in `viterbi_decoding` hard-codes this permutation.)
+One subtlety that bites anyone touching the emission code: the decoder applies
+a **fixed column permutation** when feeding these posteriors to the HMM state
+groups — for every phase-structured family the two non-zero phases are swapped
+between the label naming and the HMM phase groups (e.g. the HMM's
+`CODING_EXON_1` states read prediction *column 3*, `DSS_1` reads column 9,
+`ASS_2` reads column 11). The mapping is hard-coded in `viterbi_decoding` and
+must match the checkpoint's training convention.
 
 Per-base argmax is not enough to produce gene structures. The raw posteriors
 satisfy the *gene grammar* only statistically: an argmax path can contain an
@@ -53,10 +59,10 @@ per-process cache that all Viterbi calls share:
 ```mermaid
 flowchart LR
     H[("per-base posteriors<br/>(HDF5, both strands)")] --> R["candidate region detection<br/>cumsum window scan + RLE"]
-    R --> P{"any intron &lt; min_intron_length<br/>in decoded result?"}
-    P -- "decode @ min_intron=1" --> V1["Viterbi<br/>sparse edge table"]
-    P -- "yes → re-decode" --> V2["Viterbi<br/>full counter machine"]
-    V1 --> S["gene scoring / filtering<br/>(--min_cds_score)"]
+    R --> V1["Viterbi pass 1<br/>min_intron = 1, sparse edge table"]
+    V1 --> P{"any intron &lt; min_intron_length<br/>in decoded result?"}
+    P -- "no (common case)" --> S["gene scoring / filtering<br/>(--min_cds_score)"]
+    P -- "yes → re-decode" --> V2["Viterbi pass 2<br/>full counter machine"]
     V2 --> S
     C[("process-level cache:<br/>states · 5 matrices · edge table")]
     C -.-> V1
@@ -86,7 +92,7 @@ five families:
 | start codon | 3 | `start0..start2` | spells ATG |
 | CDS, phase-tracked | 6 | `CDS0`, `CDS0_T`, `CDS1`, `CDS1_TA`, `CDS1_TG`, `CDS2` | exon body in reading frame 0/1/2 |
 | donor/acceptor motifs | 12 | `DSS0`, `DSS1_TA`, `ASS2`, … | spell GT…AG around splice sites |
-| acceptor/stop | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA/TAG/TGA |
+| stop codon | 4 | `end0`, `end1_TA`, `end1_TG`, `end2` | spell TAA/TAG/TGA |
 | splice helpers | 24 | `intron1_TG_splice0..3` | consume the GT…AG motif inside introns |
 | intron length counters | 120 | `intron0_17`, `intron2_0`, … | enforce `min_intron_length` |
 
@@ -112,17 +118,21 @@ flowchart LR
 `CDS1`/`ASS1` are omitted for readability.)*
 
 **Phase tracking across introns.** `CDS0/1/2` encode the position within the
-current codon. To keep the frame consistent across an intron, the machine must
-remember what the exon ended with. The suffix-tagged variants do exactly that:
-`CDS0_T` means "exon in phase 0 that ended with T", and only from that state
-can the intron variant `intron0_T_*` be entered. The same suffix tags on intron
-states (`intron1_TA_…`) allow a **stop codon interrupted by an intron** to be
-recognized: a `T` before the donor, an intron, then `AA`/`AG` after the
-acceptor completes `TAA`/`TAG`, and the machine transitions into the `end`
-states instead of continuing the CDS. This is why the transition tables show
-entries like `intron1_TA_splice3 → end0` on base `T`… wait, on base `A` into
-`end1`-equivalents: the exact spelling is that acceptor-exit states reach
-`end0` on `T`, and `end1_TA → end2` on `A` completes the split stop.
+current codon, and the suffix-tagged variants track the *partial codon
+itself*: `CDS1_TA` means "phase-1 position, codon so far reads TA". The
+suffixes propagate along the whole splice arc — CDS → donor → intron →
+acceptor — through suffix-matched transitions, e.g.
+`CDS0_T --A--> DSS1_TA`, `DSS0_T --G--> intron0_T_splice0`,
+`intron0_T_splice3 --A--> ASS1_TA`, `ASS1_TA --T--> CDS2`. A partial codon
+begun before the donor is therefore completed after the acceptor: the reading
+frame survives the intron, and stop recognition resumes on the right bases.
+
+Stops themselves are spelled by the dedicated `end` chain: `CDS2 → end0` on T
+(the next in-frame codon starts with T), `end0 → end1_TA`/`end1_TG` on A/G,
+`end1_* → end2`. An acceptor exit can also start a stop directly
+(`intron2_splice3 → end0` on T — the phase-2 intron has completed its codon at
+the acceptor, so the next base begins a fresh one), and `end2 → intergenic`
+closes the gene.
 
 **Intron length counters.** A hard minimum intron length cannot be enforced by
 emissions; it needs topology. The machine instantiates `min_intron_length`
@@ -291,7 +301,7 @@ are involved):
 | Stage | Reference | This repo |
 |---|---|---|
 | candidate regions | per-50bp-window Python loop | `cumsum` window sums + run-length extraction; identical mean formula |
-| region merge | — | interval union with 100 bp buffer, sort + linear merge |
+| region merge | interval union, 100 bp buffer | unchanged |
 | state → class collapse | per-base set membership | lookup table + `np.take` |
 | CDS/intron ranges | `pandas.groupby(...).apply(lambda ...)` | numpy run-length encoding (pandas dependency removed) |
 | gene score | triple per-base Python loop | vectorized slice sums; **float64 sequential `cumsum`** preserving the reference's left-to-right accumulation order |
