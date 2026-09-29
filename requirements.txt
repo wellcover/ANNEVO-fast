@@ -1,3 +1,8 @@
+# All dependencies below are already covered by the official ANNEVO environment
+# (ANNEVO.yml: python 3.10, numpy 1.26.4, numba 0.65.1, h5py 3.14.0,
+#  biopython 1.87, tqdm 4.67.1, pytorch 2.1.0+cu121).
+# If that environment is already installed, activate it and skip pip install —
+# nothing extra is needed to run annevo-fast.
 numpy>=1.24
 numba>=0.57
 h5py>=3.8

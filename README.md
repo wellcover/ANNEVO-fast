@@ -54,6 +54,13 @@ enforced. （[中文版](docs/decoding-internals.zh-CN.md)）
 
 ## Usage
 
+**No extra environment needed if you already run official ANNEVO.** annevo-fast
+is fully covered by the official `ANNEVO.yml` environment — verified against
+the upstream file: python 3.10, numpy 1.26.4, numba 0.65.1, h5py 3.14.0,
+biopython 1.87, tqdm 4.67.1, pytorch 2.1.0+cu121 all satisfy the requirements
+below (the development environment of this repo *was* that exact env). Just
+`conda activate` it and skip the pip install; a fresh install only needs:
+
 ```bash
 pip install -r requirements.txt
 
